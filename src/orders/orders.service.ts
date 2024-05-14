@@ -1,12 +1,19 @@
-import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ChangeOrderStatusDto, CreateOrderDto, OrderPaginationDto } from './dto/index';
-import { UpdateOrderDto } from './dto/update-order.dto';
 import { PrismaClient } from '@prisma/client';
-import { RpcException } from '@nestjs/microservices';
+import { ClientProxy, RpcException } from '@nestjs/microservices';
+import { NATS_SERVICE} from 'src/config/services';
+import { firstValueFrom } from 'rxjs';
 
 @Injectable()
 export class OrdersService extends PrismaClient implements OnModuleInit{
   private readonly logger = new Logger('OrdersService')
+
+  constructor(
+    @Inject(NATS_SERVICE) private readonly client: ClientProxy
+  ){
+    super();
+  }
 
   async onModuleInit() {
    await this.$connect()
@@ -15,10 +22,74 @@ export class OrdersService extends PrismaClient implements OnModuleInit{
 
 
 
-  create(createOrderDto: CreateOrderDto) {
-    return this.order.create({
-      data: createOrderDto
-    });
+  async create(createOrderDto: CreateOrderDto) {
+
+    try {
+      // Confirmar los ids de los productos
+      const productsIds = createOrderDto.items.map(item=>item.productId)
+
+      const products = await firstValueFrom(
+        this.client.send({cmd: 'validate_products'},productsIds)
+      )
+
+      /* Calculo el precio total basado en la cantidad de elementos comprados
+         Ejemplo compro el 2 items del producto 1 cuyo precio es 50 y 1 item del
+         producto 5 cuyo precio 100 el total seria 200
+      */
+      const totalAmount = createOrderDto.items.reduce((acc,orderItem)=>{
+        const price = products.find(
+          (product) => product.id === orderItem.productId
+        ).price
+
+        return (price * orderItem.quantity)+acc
+
+      },0)
+      
+      // Cantidad de elementos a llevar
+      const totalItems = createOrderDto.items.reduce((acc,orderItem)=>{
+        return acc + orderItem.quantity
+      },0)
+
+      // Crear una transaccion de base de datos
+      const order = await this.order.create({
+        data: {
+          totalAmount,
+          totalItems,
+          OrderItem: {
+            createMany: {
+              data: createOrderDto.items.map((orderItem)=>({
+                price: products.find(
+                  (product) => product.id === orderItem.productId).price,
+                productId:orderItem.productId,
+                quantity: orderItem.quantity
+              }))
+            }
+          }
+        },
+        include: {
+          OrderItem: {
+            select: {
+              price: true,
+              quantity: true,
+              productId: true
+            }
+          }
+        }
+      })
+
+      return {
+        ...order,
+        OrderItem: order.OrderItem.map((orderItem)=>({
+          ...orderItem,
+          name: products.find((product)=>product.id===orderItem.productId).name
+        }))
+      }
+      
+    } catch (error) {
+      throw new RpcException(error)
+    }
+    
+    
   }
 
   async findAll(orderPaginationDto:OrderPaginationDto) {
@@ -51,6 +122,15 @@ export class OrdersService extends PrismaClient implements OnModuleInit{
     const order = await this.order.findUnique({
       where: {
         id
+      },
+      include: {
+        OrderItem: {
+          select: {
+            price: true,
+            quantity: true,
+            productId: true
+          }
+        }
       }
     });
 
@@ -61,7 +141,19 @@ export class OrdersService extends PrismaClient implements OnModuleInit{
       })
     }
 
-    return order
+    const productIds = order.OrderItem.map((orderItem)=>orderItem.productId)
+
+    const products = await firstValueFrom(
+      this.client.send({cmd: 'validate_products'},productIds)
+    )
+
+    return {
+      ...order,
+      OrderItem: order.OrderItem.map((orderItem)=>({
+        ...orderItem,
+        name: products.find((product)=>product.id === orderItem.productId).name
+      }))
+    }
   }
 
   async changeStatus(changerOrderStatusDto: ChangeOrderStatusDto){
