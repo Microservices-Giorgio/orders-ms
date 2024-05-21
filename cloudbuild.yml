@@ -1,5 +1,17 @@
+
 steps:
-- name: "gcr.io/cloud-builders/docker"
-  args: ["build", "-t", "us-west1-docker.pkg.dev/strong-art-422516-f9/image-registry/orders-ms-prod", "-f", "Dockerfile.prod", "--platform=linux/amd64", "."]
-- name: "gcr.io/cloud-builders/docker"
-  args: ["push", "us-west1-docker.pkg.dev/strong-art-422516-f9/image-registry/orders-ms-prod"]
+- name: 'gcr.io/cloud-builders/docker'
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    docker build -t us-west1-docker.pkg.dev/strong-art-422516-f9/image-registry/orders-ms-prod -f Dockerfile.prod --platform=linux/amd64 --build-arg ORDERS_DATABASE_URL=$$DATABASE_URL .
+  secretEnv: ['DATABASE_URL']
+
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-west1-docker.pkg.dev/strong-art-422516-f9/image-registry/orders-ms-prod']
+
+availableSecrets:
+  secretManager:
+  - versionName: projects/473755495777/secrets/ORDERS_DATABASE_URL/versions/1
+    env: 'DATABASE_URL'
